@@ -84,22 +84,29 @@ def _amplitude_loss(predicted_img: torch.Tensor,
 
     predicted_img: (1,1,H,W) real spatial image
     target_amp:    (1,1,H,W) target Fourier amplitude
+
+    Note: torch.fft.rfft2 does not support autograd on MPS, so the FFT
+    is computed on CPU and the loss is moved back to the original device.
+    The gradient flows back through the .cpu() device transfer correctly.
     """
-    # rfft2 for speed; target_amp must be cropped to rfft output size
-    fft = torch.fft.rfft2(predicted_img)          # (1,1,H,W//2+1) complex
+    original_device = predicted_img.device
+
+    # Move to CPU for FFT (MPS does not support fft autograd)
+    pred_cpu = predicted_img.cpu()
+    ta_cpu   = target_amp.detach().cpu()
+
+    fft = torch.fft.rfft2(pred_cpu)               # (1,1,H,W//2+1) complex
     fft_amp = torch.abs(fft) + eps
 
-    # target_amp is full (shifted) spectrum; extract the rfft half
-    _, _, H, W = predicted_img.shape
-    # ifftshift equivalent: roll target_amp so DC is at [0,0]
-    ta = torch.roll(target_amp,
+    _, _, H, W = pred_cpu.shape
+    ta = torch.roll(ta_cpu,
                     shifts=(-H // 2, -W // 2),
                     dims=(-2, -1))
     ta_half = ta[:, :, :, :W // 2 + 1]            # rfft2 layout
 
     # Log-amplitude L1 loss
     loss = torch.mean(torch.abs(torch.log(fft_amp + eps) - torch.log(ta_half + eps)))
-    return loss
+    return loss.to(original_device)
 
 
 def _extract_phase_from_network_output(net_output: torch.Tensor,
