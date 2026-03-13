@@ -82,31 +82,26 @@ def _amplitude_loss(predicted_img: torch.Tensor,
     """
     Core phase-retrieval loss: |FFT(predicted_img)| should equal target_amp.
 
-    predicted_img: (1,1,H,W) real spatial image
-    target_amp:    (1,1,H,W) target Fourier amplitude
-
-    Note: torch.fft.rfft2 does not support autograd on MPS, so the FFT
-    is computed on CPU and the loss is moved back to the original device.
-    The gradient flows back through the .cpu() device transfer correctly.
+    Both tensors must be on CPU. torch.fft.rfft2 autograd is only reliable
+    on CPU (MPS backend does not propagate gradients through FFT ops).
+    retrieve_phase() ensures this by running optimization on CPU when MPS
+    is detected.
     """
-    original_device = predicted_img.device
+    if predicted_img.device.type != 'cpu':
+        predicted_img = predicted_img.cpu()
+    target_amp_cpu = target_amp.detach().cpu()
 
-    # Move to CPU for FFT (MPS does not support fft autograd)
-    pred_cpu = predicted_img.cpu()
-    ta_cpu   = target_amp.detach().cpu()
-
-    fft = torch.fft.rfft2(pred_cpu)               # (1,1,H,W//2+1) complex
+    fft = torch.fft.rfft2(predicted_img)          # (1,1,H,W//2+1) complex
     fft_amp = torch.abs(fft) + eps
 
-    _, _, H, W = pred_cpu.shape
-    ta = torch.roll(ta_cpu,
+    _, _, H, W = predicted_img.shape
+    ta = torch.roll(target_amp_cpu,
                     shifts=(-H // 2, -W // 2),
                     dims=(-2, -1))
-    ta_half = ta[:, :, :, :W // 2 + 1]            # rfft2 layout
+    ta_half = ta[:, :, :, :W // 2 + 1]
 
-    # Log-amplitude L1 loss
     loss = torch.mean(torch.abs(torch.log(fft_amp + eps) - torch.log(ta_half + eps)))
-    return loss.to(original_device)
+    return loss
 
 
 def _extract_phase_from_network_output(net_output: torch.Tensor,
@@ -217,17 +212,23 @@ class DeepPriorPhaseRetrieval:
             torch.manual_seed(seed)
             np.random.seed(seed)
 
-        device = _best_device()
+        hw_device = _best_device()
+        # torch.fft.rfft2 does not support autograd on MPS.
+        # Run the entire optimization on CPU to guarantee gradient flow.
+        if hw_device.type == 'mps':
+            device = torch.device('cpu')
+            print("[DeepPriorPhaseRetrieval] MPS detected — running optimization on CPU "
+                  "(MPS does not support FFT autograd)")
+        else:
+            device = hw_device
+
         PhaseUNet = _get_model()
 
         # ── Prepare target amplitude ──────────────────────────────────────────
         amp_norm = image_tensor_to_numpy_gray(amplitude_spectrum)  # (H,W) [0,1]
         H, W = amp_norm.shape
 
-        # Convert log-normalized amplitude back to raw scale for loss
-        # We keep it in log scale for numerical stability
-        log_amp_target = amp_norm  # already log-normalized [0,1]
-        amp_target = torch.tensor(log_amp_target, dtype=torch.float32,
+        amp_target = torch.tensor(amp_norm, dtype=torch.float32,
                                   device=device).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
 
         # ── Build network ─────────────────────────────────────────────────────
