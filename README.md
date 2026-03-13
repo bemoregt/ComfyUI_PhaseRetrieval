@@ -3,6 +3,8 @@
 A ComfyUI custom node pack for **AI-based Fourier phase retrieval**.
 Given only an amplitude (magnitude) spectrum image, reconstruct the corresponding phase spectrum using deep learning — no pre-trained weights required.
 
+![이미지 스펙트럼 예시](https://github.com/bemoregt/ComfyUI_PhaseRetrieval/blob/main/ScrShot%206.png)
+
 ---
 
 ## Overview
